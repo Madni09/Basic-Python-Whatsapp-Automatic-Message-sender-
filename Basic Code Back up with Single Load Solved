@@ -1,0 +1,93 @@
+# pip install pyperclip selenium webdriver-manager
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+import urllib.parse, time, sys
+import pyperclip
+
+# ─── CONFIG ─────────────────────────────────────────────
+leads = [
+
+"919409800176",
+"917621851489",
+"919409800176"
+   
+]
+
+
+#"🔗 Please reply "Hi" to activate Links if they are not visible to you."""
+# 🔗 We hope message links are visible to you. If not, please reply "Hi" to activate Links.
+
+# Your entire message, exactly as you want it to appear
+
+full_msg = """Hey put your message here."""
+
+# Prepare Chrome
+options = Options()
+options.add_argument(r"--user-data-dir=C:\Users\madni\chrome_profile")
+options.add_argument("--start-maximized")
+
+driver = webdriver.Chrome(
+    service=Service(ChromeDriverManager().install()),
+    options=options
+)
+
+# ─── STEP 1: Log in ──────────────────────────────────────
+driver.get("https://web.whatsapp.com")
+print("🔑 Waiting for WhatsApp Web to load…")
+#time.sleep(50000) # Wait for user to scan QR code
+
+
+try:
+    WebDriverWait(driver, 30).until(
+        EC.presence_of_element_located((By.ID, "pane-side"))
+    )
+    print("✅ Logged in successfully.")
+except Exception as e:
+    print("❌ ERROR: WhatsApp did not load.", e)
+    driver.quit()
+    sys.exit()
+
+#time.sleep(5000000) # Give it a moment to ensure everything is loaded
+# ─── STEP 2: Send Messages ──────────────────────────────
+for idx, number in enumerate(leads, start=1):
+    print(f"\n⏳ [{idx}/{len(leads)}] Sending to {number}…")
+    url = f"https://web.whatsapp.com/send?phone={number}"
+    driver.get(url)
+
+    # wait for the chat footer
+    try:
+        footer = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.XPATH, "//footer"))
+        )
+    except Exception:
+        print(f"❌ Chat window did not load for {number}.")
+        continue
+
+    # find the editable div, click, paste and send
+    try:
+        msg_box = footer.find_element(By.XPATH, './/div[@contenteditable="true"]')
+        msg_box.click()
+        time.sleep(0.5)
+
+        # copy to clipboard & paste
+        pyperclip.copy(full_msg)
+        msg_box.send_keys(Keys.CONTROL, 'v')
+        time.sleep(0.5)
+
+        # hit Enter to send
+        msg_box.send_keys(Keys.ENTER)
+        print(f"✅ Message sent to {number}")
+    except Exception as e:
+        print(f"❌ Failed to send message to {number}: {e!r}")
+        continue
+
+    time.sleep(14)  # Give a little time before next message
+
+print("\n🎉 All done. Closing browser.")
+driver.quit()
