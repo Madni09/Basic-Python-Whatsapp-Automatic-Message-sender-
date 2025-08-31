@@ -1,0 +1,251 @@
+# pip install selenium webdriver-manager pyperclip
+import os, sys, re, time, random, platform, csv
+from datetime import datetime
+import pyperclip
+
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import (
+    TimeoutException, NoSuchElementException, StaleElementReferenceException
+)
+from webdriver_manager.chrome import ChromeDriverManager
+
+# ───────────────────── CONFIG ─────────────────────
+DEFAULT_COUNTRY_CODE = "91"                      # change if needed
+CHROME_PROFILE = r"C:\Users\madni\chrome_profile"  # your Chrome profile
+TIMEOUT_LOGIN = 60
+TIMEOUT_CHAT = 25
+RETRY_ATTEMPTS = 2
+
+# Leads (raw). We will normalize and de‑dupe below.
+RAW_LEADS = ["910000000000",
+
+    
+ # duplicate on purpose
+]
+
+FULL_MSG = """Hey put your message here."""
+
+REPORT_CSV = f"wa_send_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+# ─────────────── HELPERS: hygiene & timing ───────────────
+def normalize_number(raw: str, default_cc=DEFAULT_COUNTRY_CODE) -> str:
+    """Keep digits only. If 10 digits, prefix default country code (e.g., 91)."""
+    digits = re.sub(r"\D", "", raw or "")
+    if len(digits) == 10:
+        digits = default_cc + digits
+    return digits
+
+def dedupe(seq):
+    """Preserve order, remove duplicates."""
+    seen = set()
+    out = []
+    for x in seq:
+        if x not in seen:
+            out.append(x)
+            seen.add(x)
+    return out
+
+def human_pause(base=6, spread=8):
+    """Randomized delay to look human."""
+    time.sleep(base + random.random() * spread)
+
+def os_paste_key():
+    return Keys.COMMAND if platform.system().lower() == "darwin" else Keys.CONTROL
+
+def with_retry(fn, tries=RETRY_ATTEMPTS, backoff=1.4):
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except (TimeoutException, StaleElementReferenceException) as e:
+            last = e
+            time.sleep(backoff * (i + 1))
+    if last:
+        raise last
+
+# ─────────────── HELPERS: WA detection ───────────────
+def wait_for_login(driver):
+    WebDriverWait(driver, TIMEOUT_LOGIN).until(
+        EC.presence_of_element_located((By.ID, "pane-side"))
+    )
+
+def open_chat(driver, number: str):
+    """
+    Navigate to chat deep link and decide:
+      - return ("ok", footer_element) if chat composer appears
+      - return ("invalid", None) if invalid-number dialog appears
+      - return ("fail", None) otherwise
+    """
+    url = f"https://web.whatsapp.com/send?phone={number}"
+    driver.get(url)
+
+    # Wait for either footer OR invalid dialog
+    start = time.time()
+    while time.time() - start < TIMEOUT_CHAT:
+        # 1) invalid dialog?
+        try:
+            dialog = driver.find_elements(By.XPATH, "//div[@role='dialog']")
+            if dialog:
+                # Check text inside dialog for 'invalid'
+                if any("invalid" in d.text.lower() for d in dialog):
+                    # Best-effort click OK if present
+                    try:
+                        ok_btn = dialog[0].find_element(
+                            By.XPATH,
+                            ".//div[@role='button' or self::button][.//span[normalize-space()='OK'] or normalize-space()='OK']"
+                        )
+                        ok_btn.click()
+                    except Exception:
+                        pass
+                    return ("invalid", None)
+        except Exception:
+            pass
+
+        # 2) footer present?
+        try:
+            footer = driver.find_element(By.XPATH, "//footer")
+            if footer:
+                return ("ok", footer)
+        except NoSuchElementException:
+            pass
+
+        time.sleep(0.3)
+
+    return ("fail", None)
+
+"""def send_message(driver, footer_element, message: str):
+    Paste message (clipboard), fallback to direct typing, then Enter to send.
+    # primary composer
+    msg_box = WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.XPATH, ".//div[@contenteditable='true']"))
+    )
+    msg_box.click()
+    time.sleep(0.3)
+
+    # Try clipboard paste
+    pyperclip.copy(message)
+    msg_box.send_keys(os_paste_key(), 'v')
+    time.sleep(0.3)
+
+    # Fallback: tiny mutation so we can safely type without duplicating pastes
+    msg_box.send_keys(" ")
+    msg_box.send_keys(Keys.BACKSPACE)
+
+    # Send (ENTER). If you need a line break, use SHIFT+ENTER before final ENTER.
+    msg_box.send_keys(Keys.ENTER)"""
+
+def send_message(driver, footer_element, message: str):
+    """Paste message (clipboard), fallback to direct typing, then Enter to send."""
+
+    # Scoped to footer: ensures we don’t hit the search box
+    msg_box = WebDriverWait(footer_element, 10).until(
+        EC.element_to_be_clickable((By.XPATH, './/div[@contenteditable="true"]'))
+    )
+    msg_box.click()
+    time.sleep(0.3)
+
+    # Paste
+    pyperclip.copy(message)
+    msg_box.send_keys(os_paste_key(), 'v')
+    time.sleep(0.3)
+
+    # Tiny mutation fallback
+    msg_box.send_keys(" ")
+    msg_box.send_keys(Keys.BACKSPACE)
+
+    # Send
+    msg_box.send_keys(Keys.ENTER)
+
+
+# ───────────────────── MAIN ─────────────────────
+def main():
+    # Prepare leads: normalize & dedupe & basic validation by length (11–15 digits common)
+    leads = [normalize_number(n) for n in RAW_LEADS]
+    leads = [n for n in leads if 11 <= len(n) <= 15]
+    leads = dedupe(leads)
+
+    # Setup report
+    report_rows = []
+    def log_result(number, status, note=""):
+        report_rows.append({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "number": number,
+            "status": status,         # sent / invalid / fail
+            "note": note
+        })
+
+    # Chrome setup
+    options = Options()
+    options.add_argument(f"--user-data-dir={CHROME_PROFILE}")
+    options.add_argument("--start-maximized")
+    # options.add_argument("--disable-extensions")  # uncomment if extensions interfere
+
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()),
+        options=options
+    )
+
+    try:
+        # Login
+        driver.get("https://web.whatsapp.com")
+        print("🔑 Waiting for WhatsApp Web to load & authenticate…")
+        with_retry(lambda: wait_for_login(driver), tries=2)
+        print("✅ Logged in.")
+
+        total = len(leads)
+        for idx, number in enumerate(leads, start=1):
+            print(f"\n⏳ [{idx}/{total}] {number}: opening chat…")
+            try:
+                status, footer = with_retry(lambda: open_chat(driver, number), tries=2)
+            except Exception as e:
+                print(f"❌ Open failed for {number}: {e}")
+                log_result(number, "fail", "open_chat_exception")
+                continue
+
+            if status == "invalid":
+                print(f"🚫 {number} invalid / not on WhatsApp. Skipping.")
+                log_result(number, "invalid")
+                human_pause(2, 2)  # small pause after dialog
+                continue
+            elif status == "fail":
+                print(f"❌ Could not open chat for {number} within timeout.")
+                log_result(number, "fail", "open_timeout")
+                continue
+
+            # Send message
+            try:
+                with_retry(lambda: send_message(driver, footer, FULL_MSG), tries=2)
+                print(f"✅ Sent to {number}")
+                log_result(number, "sent")
+            except Exception as e:
+                print(f"❌ Send failed for {number}: {e}")
+                log_result(number, "fail", "send_exception")
+                continue
+
+            # Human-like cooldown
+            human_pause(6, 8)
+
+    finally:
+        # Write report
+        try:
+            with open(REPORT_CSV, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=["timestamp", "number", "status", "note"])
+                writer.writeheader()
+                writer.writerows(report_rows)
+            print(f"\n📄 Run report saved: {REPORT_CSV}")
+        except Exception as e:
+            print(f"⚠️ Could not write report: {e}")
+
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
